@@ -13,6 +13,12 @@ type Options struct {
 	// GcDuration 是自动淘汰机制的时间间隔，每隔固定的 GcDuration 时间就会进行一次自动淘汰。
 	// 这个值的单位是分钟。
 	GcDuration int64
+
+	//持久化文件的路径
+	DumpFile string
+
+	//每一次持久化文件的时间
+	DumpDuration int64
 }
 
 // DefaultOptions 返回一个默认的选项设置对象。
@@ -21,6 +27,8 @@ func DefaultOptions() Options {
 		MaxEntrySize: int64(4), // 默认是 4 GB
 		MaxGcCount:   1000, // 默认是 1000 个
 		GcDuration:   60, // 默认是 1 小时
+		DumpFile:     "Rcache.dump", // 默认的持久化文件在缓存的启动位置，名字为 cache-server.dump
+		DumpDuration: 30, // 默认的持久化时间间隔设置为 30 分钟
 	}
 }
 

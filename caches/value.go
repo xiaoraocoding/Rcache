@@ -15,33 +15,31 @@ const (
 type value struct {
 
 	// data 存储着真正的数据。
-	data []byte
+	Data []byte
 
 	// ttl 代表这个数据的寿命。
 	// 这个值的单位是秒。
-	ttl int64
+	Ttl int64
 
 	// ctime 代表这个数据的创建时间。
-	ctime int64
+	Ctime int64
 }
 
-// newValue 返回一个包装之后的数据。
 func newValue(data []byte, ttl int64) *value {
 	return &value{
-		data:  helpers.Copy(data),
-		ttl:   ttl,
-		ctime: time.Now().Unix(),
+		// 注意修改字段为大写开头
+		Data:  helpers.Copy(data),
+		Ttl:   ttl,
+		Ctime: time.Now().Unix(),
 	}
 }
 
-// alive 返回这个数据是否存活。
 func (v *value) alive() bool {
-	// 首先判断是否有过期时间，然后判断当前时间是否超过了这个数据的死期
-	return v.ttl == NeverDie || time.Now().Unix()-v.ctime < v.ttl
+	return v.Ttl == NeverDie || time.Now().Unix()-v.Ctime < v.Ttl
 }
 
-// visit 返回这个数据的实际存储数据。
 func (v *value) visit() []byte {
-	atomic.SwapInt64(&v.ctime, time.Now().Unix())
-	return v.data
+	// 注意修改字段为大写开头
+	atomic.SwapInt64(&v.Ctime, time.Now().Unix())
+	return v.Data
 }
