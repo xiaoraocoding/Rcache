@@ -2,32 +2,25 @@
 package test
 
 import (
-"net/http"
-"strconv"
-"strings"
-"sync"
-"testing"
-"time"
+	"Rcache/servers"
+	"net/http"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
 )
 
 const (
-	// concurrency 是测试的并发度。
-	concurrency = 1000
+	// keySize 是测试的键值对数量。
+	keySize = 10000
 )
 
-// testTask 是一个包装器，把 task 包装成 testTask.
+// testTask 将任务包装成测试任务。
 func testTask(task func(no int)) string {
-
 	beginTime := time.Now()
-	wg := &sync.WaitGroup{}
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(no int) {
-			defer wg.Done()
-			task(no)
-		}(i)
+	for i := 0; i < keySize; i++ {
+		task(i)
 	}
-	wg.Wait()
 	return time.Now().Sub(beginTime).String()
 }
 
@@ -64,6 +57,38 @@ func TestHttpServer(t *testing.T) {
 			t.Fatal(err)
 		}
 		response.Body.Close()
+	})
+
+	t.Logf("读取消耗时间为 %s。", readTime)
+}
+
+// go test -v -count=1 performance_test.go -run=^TestTcpServer$
+func TestTcpServer(t *testing.T) {
+
+	client, err := servers.NewTCPClient(":5837")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer client.Close()
+
+	writeTime := testTask(func(no int) {
+		data := strconv.Itoa(no)
+		err := client.Set(data, []byte(data), 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+	})
+
+	t.Logf("写入消耗时间为 %s。", writeTime)
+
+	time.Sleep(3 * time.Second)
+
+	readTime := testTask(func(no int) {
+		data := strconv.Itoa(no)
+		_, err := client.Get(data)
+		if err != nil {
+			t.Fatal(err)
+		}
 	})
 
 	t.Logf("读取消耗时间为 %s。", readTime)
