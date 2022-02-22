@@ -1,22 +1,26 @@
+
 package test
 
 import (
-	"net/http"
-	"strconv"
-	"strings"
-	"sync"
-	"testing"
-	"time"
+"net/http"
+"strconv"
+"strings"
+"sync"
+"testing"
+"time"
 )
 
 const (
-	concurrency = 1000 //测试并发度
+	// concurrency 是测试的并发度。
+	concurrency = 1000
 )
 
+// testTask 是一个包装器，把 task 包装成 testTask.
 func testTask(task func(no int)) string {
+
 	beginTime := time.Now()
 	wg := &sync.WaitGroup{}
-	for i:=0 ; i < concurrency ; i++ {
+	for i := 0; i < concurrency; i++ {
 		wg.Add(1)
 		go func(no int) {
 			defer wg.Done()
@@ -27,7 +31,8 @@ func testTask(task func(no int)) string {
 	return time.Now().Sub(beginTime).String()
 }
 
-func TestCacheServer(t *testing.T) {
+// go test -v -count=1 performance_test.go -run=^TestHttpServer$
+func TestHttpServer(t *testing.T) {
 
 	writeTime := testTask(func(no int) {
 		data := strconv.Itoa(no)
@@ -63,5 +68,3 @@ func TestCacheServer(t *testing.T) {
 
 	t.Logf("读取消耗时间为 %s。", readTime)
 }
-
-
