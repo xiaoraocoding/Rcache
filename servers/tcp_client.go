@@ -64,3 +64,14 @@ func (tc *TCPClient) Status() (*caches.Status, error) {
 func (tc *TCPClient) Close() error {
 	return tc.client.Close()
 }
+
+
+func (tc *TCPClient) Nodes() ([]string, error) {
+	body, err := tc.client.Do(nodesCommand, nil)
+	if err != nil {
+		return nil, err
+	}
+	var nodes []string
+	err = json.Unmarshal(body, &nodes)
+	return nodes, err
+}

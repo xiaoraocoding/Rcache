@@ -2,10 +2,12 @@ package servers
 
 import (
 	"Rcache/caches"
+	"Rcache/helpers"
 	"Rcache/vex"
 	"encoding/binary"
 	"encoding/json"
 	"errors"
+	"fmt"
 )
 
 const (
@@ -20,6 +22,9 @@ const (
 
 	// statusCommand 是 status 命令。
 	statusCommand = byte(4)
+
+	// nodesCommand 是 nodes 命令。
+	nodesCommand = byte(5)
 )
 
 var (
@@ -35,26 +40,39 @@ type TCPServer struct {
 	// cache 是内部用于存储数据的缓存组件。
 	cache *caches.Cache
 
+	*node
+
 	// server 是内部真正用于服务的服务器。
 	server *vex.Server
+	// options 存储着这个服务器的选项配置。
+	options *Options
 }
 
 // NewTCPServer 返回新的 TCP 服务器。
-func NewTCPServer(cache *caches.Cache) *TCPServer {
-	return &TCPServer{
-		cache:  cache,
-		server: vex.NewServer(),
+func NewTCPServer(cache *caches.Cache, options *Options) (*TCPServer, error) {
+
+	n, err := newNode(options)
+	if err != nil {
+		return nil, err
 	}
+
+	return &TCPServer{
+		node: n,
+		cache:   cache,
+		server:  vex.NewServer(),
+		options: options,
+	}, nil
 }
 
 // Run 运行这个 TCP 服务器。
-func (ts *TCPServer) Run(address string) error {
+func (ts *TCPServer) Run() error {
 	// 注册几种命令的处理器
 	ts.server.RegisterHandler(getCommand, ts.getHandler)
 	ts.server.RegisterHandler(setCommand, ts.setHandler)
 	ts.server.RegisterHandler(deleteCommand, ts.deleteHandler)
 	ts.server.RegisterHandler(statusCommand, ts.statusHandler)
-	return ts.server.ListenAndServe("tcp", address)
+	ts.server.RegisterHandler(nodesCommand, ts.nodesHandler)
+	return ts.server.ListenAndServe("tcp", helpers.JoinAddressAndPort(ts.options.Address, ts.options.Port))
 }
 
 // Close 用于关闭服务器。
@@ -62,7 +80,7 @@ func (ts *TCPServer) Close() error {
 	return ts.server.Close()
 }
 
-// =======================================================================
+
 
 // getHandler 是处理 get 命令的的处理器。
 func (ts *TCPServer) getHandler(args [][]byte) (body []byte, err error) {
@@ -72,8 +90,20 @@ func (ts *TCPServer) getHandler(args [][]byte) (body []byte, err error) {
 		return nil, commandNeedsMoreArgumentsErr
 	}
 
+	// 使用一致性哈希选择出这个 key 所属的物理节点
+	key := string(args[0])
+	node, err := ts.selectNode(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// 判断这个 key 所属的物理节点是否是当前节点，如果不是，需要响应重定向信息给客户端，并告知正确的节点地址
+	if !ts.isCurrentNode(node) {
+		return nil, fmt.Errorf("redirect to node %s", node)
+	}
+
 	// 调用缓存的 Get 方法，如果不存在就返回 notFoundErr 错误
-	value, ok := ts.cache.Get(string(args[0]))
+	value, ok := ts.cache.Get(key)
 	if !ok {
 		return value, notFoundErr
 	}
@@ -88,9 +118,21 @@ func (ts *TCPServer) setHandler(args [][]byte) (body []byte, err error) {
 		return nil, commandNeedsMoreArgumentsErr
 	}
 
+	// 使用一致性哈希选择出这个 key 所属的物理节点
+	key := string(args[1])
+	node, err := ts.selectNode(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// 判断这个 key 所属的物理节点是否是当前节点，如果不是，需要响应重定向信息给客户端，并告知正确的节点地址
+	if !ts.isCurrentNode(node) {
+		return nil, fmt.Errorf("redirect to node %s", node)
+	}
+
 	// 读取 ttl，注意这里使用大端的方式读取，所以要求客户端也以大端的方式进行存储
 	ttl := int64(binary.BigEndian.Uint64(args[0]))
-	err = ts.cache.SetWithTTL(string(args[1]), args[2], ttl)
+	err = ts.cache.SetWithTTL(key, args[2], ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -105,8 +147,20 @@ func (ts *TCPServer) deleteHandler(args [][]byte) (body []byte, err error) {
 		return nil, commandNeedsMoreArgumentsErr
 	}
 
+	// 使用一致性哈希选择出这个 key 所属的物理节点
+	key := string(args[0])
+	node, err := ts.selectNode(key)
+	if err != nil {
+		return nil, err
+	}
+
+	// 判断这个 key 所属的物理节点是否是当前节点，如果不是，需要响应重定向信息给客户端，并告知正确的节点地址
+	if !ts.isCurrentNode(node) {
+		return nil, fmt.Errorf("redirect to node %s", node)
+	}
+
 	// 删除指定的数据
-	err = ts.cache.Delete(string(args[0]))
+	err = ts.cache.Delete(key)
 	if err != nil {
 		return nil, err
 	}
@@ -116,4 +170,9 @@ func (ts *TCPServer) deleteHandler(args [][]byte) (body []byte, err error) {
 // statusHandler 是返回缓存状态的处理器。
 func (ts *TCPServer) statusHandler(args [][]byte) (body []byte, err error) {
 	return json.Marshal(ts.cache.Status())
+}
+
+// nodesHandler 是返回集群所有节点名称的处理器。
+func (ts *TCPServer) nodesHandler(args [][]byte) (body []byte, err error) {
+	return json.Marshal(ts.nodes())
 }

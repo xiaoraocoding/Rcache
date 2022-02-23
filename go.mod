@@ -6,6 +6,7 @@ require (
 	github.com/gomodule/redigo v1.8.8
 	github.com/hashicorp/memberlist v0.3.1
 	github.com/julienschmidt/httprouter v1.3.0
+	stathat.com/c/consistent v1.0.0
 
 )
 

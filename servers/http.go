@@ -2,6 +2,7 @@ package servers
 
 import (
 	"Rcache/caches"
+	"Rcache/helpers"
 	"encoding/json"
 	"github.com/julienschmidt/httprouter"
 	"io/ioutil"
@@ -14,21 +15,34 @@ import (
 type HTTPServer struct {
 	// cache 是内部存储用的缓存实例。
 	cache *caches.Cache
+	// node 是内部用于记录集群信息的实例。
+	*node
+	// options 存储着这个服务器的选项配置。
+	options *Options
 }
 
-// NewHTTPServer 返回一个 http 服务器。
-func NewHTTPServer(cache *caches.Cache) *HTTPServer {
-	return &HTTPServer{
-		cache: cache,
+//返回一个HTTP实例
+func NewHTTPServer(cache *caches.Cache, options *Options) (*HTTPServer, error) {
+
+	// 创建 node 实例
+	n, err := newNode(options)
+	if err != nil {
+		return nil, err
 	}
+
+	return &HTTPServer{
+		node: n,
+		cache:   cache,
+		options: options,
+	}, nil
 }
 
 // Run 启动这个 http 服务器。
-func (hs *HTTPServer) Run(address string) error {
-	return http.ListenAndServe(address, hs.routerHandler())
+func (hs *HTTPServer) Run() error {
+	return http.ListenAndServe(helpers.JoinAddressAndPort(hs.options.Address, hs.options.Port), hs.routerHandler())
 }
 
-// =======================================================================
+
 
 // wrapUriWithVersion 会用 API 版本去包装 uri，比如 "v1" 版本的 API 包装 "/cache" 就会变成 "/v1/cache"。
 func wrapUriWithVersion(uri string) string {
@@ -42,15 +56,32 @@ func (hs *HTTPServer) routerHandler() http.Handler {
 	router.PUT(wrapUriWithVersion("/cache/:key"), hs.setHandler)
 	router.DELETE(wrapUriWithVersion("/cache/:key"), hs.deleteHandler)
 	router.GET(wrapUriWithVersion("/status"), hs.statusHandler)
+	router.GET(wrapUriWithVersion("/nodes"), hs.nodesHandler)
 	return router
 }
 
+
 // getHandler 获取缓存中的数据并返回。
 func (hs *HTTPServer) getHandler(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
+
+	// 使用一致性哈希选择出这个 key 所属的物理节点
 	key := params.ByName("key")
+	node, err := hs.selectNode(key)
+	if err != nil {
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 判断这个 key 所属的物理节点是否是当前节点，如果不是，需要响应重定向信息给客户端，并告知正确的节点地址
+	if !hs.isCurrentNode(node) {
+		writer.Header().Set("Location", node + request.RequestURI)
+		writer.WriteHeader(http.StatusTemporaryRedirect)
+		return
+	}
+
+	// 当前节点处理
 	value, ok := hs.cache.Get(key)
 	if !ok {
-		// 返回 404 错误码
 		writer.WriteHeader(http.StatusNotFound)
 		return
 	}
@@ -60,10 +91,24 @@ func (hs *HTTPServer) getHandler(writer http.ResponseWriter, request *http.Reque
 // setHandler 添加数据到缓存中。
 func (hs *HTTPServer) setHandler(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
 
+	// 使用一致性哈希选择出这个 key 所属的物理节点
 	key := params.ByName("key")
+	node, err := hs.selectNode(key)
+	if err != nil {
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 判断这个 key 所属的物理节点是否是当前节点，如果不是，需要响应重定向信息给客户端，并告知正确的节点地址
+	if !hs.isCurrentNode(node) {
+		writer.Header().Set("Location", node+request.RequestURI)
+		writer.WriteHeader(http.StatusTemporaryRedirect)
+		return
+	}
+
+	// 当前节点处理
 	value, err := ioutil.ReadAll(request.Body)
 	if err != nil {
-		// 返回 500 错误码
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -71,7 +116,6 @@ func (hs *HTTPServer) setHandler(writer http.ResponseWriter, request *http.Reque
 	// 从请求中获取 ttl
 	ttl, err := ttlOf(request)
 	if err != nil {
-		// 返回 500 错误码
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -100,9 +144,26 @@ func ttlOf(request *http.Request) (int64, error) {
 	return strconv.ParseInt(ttls[0], 10, 64)
 }
 
+// deleteHandler 从缓存中删除指定数据。
 func (hs *HTTPServer) deleteHandler(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
+
+	// 使用一致性哈希选择出这个 key 所属的物理节点
 	key := params.ByName("key")
-	err := hs.cache.Delete(key) // 原本这个方法没有返回值，现在需要加上
+	node, err := hs.selectNode(key)
+	if err != nil {
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	// 判断这个 key 所属的物理节点是否是当前节点，如果不是，需要响应重定向信息给客户端，并告知正确的节点地址
+	if !hs.isCurrentNode(node) {
+		writer.Header().Set("Location", node+request.RequestURI)
+		writer.WriteHeader(http.StatusTemporaryRedirect)
+		return
+	}
+
+	// 当前节点处理
+	err = hs.cache.Delete(key)
 	if err != nil {
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
@@ -113,9 +174,18 @@ func (hs *HTTPServer) deleteHandler(writer http.ResponseWriter, request *http.Re
 func (hs *HTTPServer) statusHandler(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
 	status, err := json.Marshal(hs.cache.Status())
 	if err != nil {
-		// 返回 500 错误码
 		writer.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 	writer.Write(status)
+}
+
+// nodesHandler is handler for fetching the nodes of cluster.
+func (hs *HTTPServer) nodesHandler(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
+	nodes, err := json.Marshal(hs.nodes())
+	if err != nil {
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+	writer.Write(nodes)
 }
