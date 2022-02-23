@@ -65,7 +65,7 @@ func TestHttpServer(t *testing.T) {
 // go test -v -count=1 performance_test.go -run=^TestTcpServer$
 func TestTcpServer(t *testing.T) {
 
-	client, err := servers.NewTCPClient(":5837")
+	client, err := servers.NewTCPClient("127.0.0.1:5837")
 	if err != nil {
 		t.Fatal(err)
 	}
