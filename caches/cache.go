@@ -1,49 +1,51 @@
 package caches
 
 import (
-	"errors"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
-// Cache 代表缓存的结构体。
+// Cache 是代表缓存的结构体。
 type Cache struct {
 
-	// data 存储着实际的键值对数据。
-	data map[string]*value
+	// segmentSize 是 segment 的数量，这个数量越多，理论上并发的性能就越好。
+	segmentSize int
 
+	// segments 存储着所有的 segment 实例。
+	segments []*segment
 
-	options Options
+	// options 是缓存配置。
+	options *Options
 
-	// status 表示缓存的状态信息。
-	// 这里使用的是指针类型，因为这个 status 会在内部不断地更新，所以想明确地表达出这个值是会被修改的。
-	status *Status
-
-	// lock 是保证并发安全的锁。
-	lock *sync.RWMutex
+	// dumping 标识当前缓存是否处于持久化状态。1 表示处于持久化状态。
+	// 因为现在的 cache 是没有全局锁的，而持久化需要记录下当前的状态，不允许有更新，所以使用一个变量记录着，
+	// 如果处于持久化状态，就让所有更新操作进入自旋状态，等待持久化完成再进行。
+	dumping int32
 }
 
-// NewCache 返回一个默认配置的缓存对象。
+// NewCache 返回一个默认配置的缓存实例。
 func NewCache() *Cache {
 	return NewCacheWith(DefaultOptions())
 }
 
-// NewCacheWith 返回一个指定配置的缓存对象。
+// NewCacheWith 返回一个使用 options 初始化过的缓存实例
 func NewCacheWith(options Options) *Cache {
-	// 这是新增代码，主要是先从持久化文件进行恢复，如果恢复不成功，就返回一个空的缓存
+	// 尝试从持久化文件中恢复
 	if cache, ok := recoverFromDumpFile(options.DumpFile); ok {
 		return cache
 	}
 	return &Cache{
-		// 这里指定 256 的初始容量是为了减少哈希冲突的几率和扩容带来的性能损失
-		data:    make(map[string]*value, 256),
-		options: options,
-		status:  newStatus(),
-		lock:    &sync.RWMutex{},
+		segmentSize: options.SegmentSize,
+
+		// 初始化所有的 segment
+		segments: newSegments(&options),
+		options:  &options,
+		dumping:  0,
 	}
 }
 
-
+// recoverFromDumpFile 从持久化文件中恢复缓存。
 func recoverFromDumpFile(dumpFile string) (*Cache, bool) {
 	cache, err := newEmptyDump().from(dumpFile)
 	if err != nil {
@@ -52,106 +54,91 @@ func recoverFromDumpFile(dumpFile string) (*Cache, bool) {
 	return cache, true
 }
 
-// Get 返回指定 Key 的数据，如果找不到就返回 false。
-func (c *Cache) Get(key string) ([]byte, bool) {
-	c.lock.RLock()
-	defer c.lock.RUnlock()
-	value, ok := c.data[key]
-	if !ok {
-		return nil, false
+// newSegments 返回初始化好的 segment 实例列表。
+func newSegments(options *Options) []*segment {
+	// 根据配置的数量生成 segment
+	segments := make([]*segment, options.SegmentSize)
+	for i := 0; i < options.SegmentSize; i++ {
+		segments[i] = newSegment(options)
 	}
-	if !value.alive() {
-		c.lock.RUnlock()
-		c.Delete(key)
-		c.lock.RLock()
-		return nil, false
-	}
-
-	// 注意这个 visit 方法会使用 Swap 的形式更新数据的创建时间，用于实现 LRU 过期机制
-	return value.visit(), true
+	return segments
 }
 
-// Set 添加一个键值对到缓存中，不设定 ttl，也就意味着数据不会过期。
-// 返回 error 是 nil 说明添加成功，否则就是添加失败，可能是触发了写满保护机制，拒绝写入数据。
+// index 是选择 segment 的“特殊算法”。
+// 这里参考了 Java 中的哈希生成逻辑，尽可能避免重复。不用去纠结为什么这么写，因为没有唯一的写法。
+// 为了能使用到哈希值的全部数据，这里使用高位和低位进行异或操作。
+func index(key string) int {
+	index := 0
+	keyBytes := []byte(key)
+	for _, b := range keyBytes {
+		index = 31*index + int(b&0xff)
+	}
+	return index ^ (index >> 16)
+}
+
+// segmentOf 返回 key 对应的 segment。
+// 使用 index 生成的哈希值去获取 segment，这里使用 & 运算也是 Java 中的奇淫技巧。
+func (c *Cache) segmentOf(key string) *segment {
+	return c.segments[index(key)&(c.segmentSize-1)]
+}
+
+// Get 返回指定 key 的数据。
+func (c *Cache) Get(key string) ([]byte, bool) {
+	// 这边会等待持久化完成
+	c.waitForDumping()
+	return c.segmentOf(key).get(key)
+}
+
+// Set 添加指定的数据到缓存中。
 func (c *Cache) Set(key string, value []byte) error {
 	return c.SetWithTTL(key, value, NeverDie)
 }
 
-// SetWithTTL 添加一个键值对到缓存中，使用给定的 ttl 去设定过期时间。
-// 返回 error 是 nil 说明添加成功，否则就是添加失败，可能是触发了写满保护机制，拒绝写入数据。
+// SetWithTTL 添加指定的数据到缓存中，并设置相应的有效期。
 func (c *Cache) SetWithTTL(key string, value []byte, ttl int64) error {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	if oldValue, ok := c.data[key]; ok {
-		// 如果是已经存在的 key，就不属于新增键值对了，为了方便处理，先把原本的键值对信息去除
-		c.status.subEntry(key, oldValue.Data)
-	}
+	// 这边会等待持久化完成
+	c.waitForDumping()
+	return c.segmentOf(key).set(key, value, ttl)
+}
 
-	// 这边会判断缓存的容量是否足够，如果不够了，就返回写满保护的错误信息
-	if !c.checkEntrySize(key, value) {
-		// 注意刚刚把旧的键值对信息去除了，现在要加回去，因为并没有添加新的键值对
-		if oldValue, ok := c.data[key]; ok {
-			c.status.addEntry(key, oldValue.Data)
-		}
-
-
-		return errors.New("the entry size will exceed if you set this entry")
-	}
-
-	// 添加新的键值对，需要先更新缓存信息，然后保存数据
-	c.status.addEntry(key, value)
-	c.data[key] = newValue(value, ttl)
+// Delete 从缓存中删除指定 key 的数据。
+func (c *Cache) Delete(key string) error {
+	// 这边会等待持久化完成
+	c.waitForDumping()
+	c.segmentOf(key).delete(key)
 	return nil
 }
 
-// Delete 删除 key 指定的数据。
-func (c *Cache) Delete(key string) {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-	if oldValue, ok := c.data[key]; ok {
-		// 如果存在这个 key 才会进行删除，并且需要先把缓存信息更新掉
-		c.status.subEntry(key, oldValue.Data)
-		delete(c.data, key)
-	}
-}
-
-// Status 返回缓存信息。
+// Status 返回缓存当前的情况。
 func (c *Cache) Status() Status {
-	c.lock.RLock()
-	defer c.lock.RUnlock()
-
-	return *c.status
-}
-
-// checkEntrySize 会检查要添加的键值对是否满足当前缓存的要求。
-func (c *Cache) checkEntrySize(newKey string, newValue []byte) bool {
-	// 将当前的键值对占用空间加上要被添加的键值对占用空间，然后和配置中的最大键值对占用空间进行比较
-	return c.status.entrySize()+int64(len(newKey))+int64(len(newValue)) <= c.options.MaxEntrySize*1024*1024
-}
-
-// gc 会触发数据清理任务，主要是清理过期的数据。
-func (c *Cache) gc() {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	// 使用 count 记录当前清理的个数
-	count := 0
-	for key, value := range c.data {
-		if !value.alive() {
-			c.status.subEntry(key, value.Data)
-			delete(c.data, key)
-			count++
-			if count >= c.options.MaxGcCount {
-				break
-			}
-		}
+	result := NewStatus()
+	for _, segment := range c.segments {
+		status := segment.status()
+		result.Count += status.Count
+		result.KeySize += status.KeySize
+		result.ValueSize += status.ValueSize
 	}
+	return *result
 }
 
-// AutoGc 会开启一个定时 GC 的异步任务。
+// gc 会清理缓存中过期的数据。
+func (c *Cache) gc() {
+	// 这边会等待持久化完成
+	c.waitForDumping()
+	wg := &sync.WaitGroup{}
+	for _, seg := range c.segments {
+		wg.Add(1)
+		go func(s *segment) {
+			defer wg.Done()
+			s.gc()
+		}(seg)
+	}
+	wg.Wait()
+}
+
+// AutoGc 会开启一个异步任务去定时清理过期的数据。
 func (c *Cache) AutoGc() {
 	go func() {
-		// 根据配置中的 GcDuration 来设置定时的间隔
 		ticker := time.NewTicker(time.Duration(c.options.GcDuration) * time.Minute)
 		for {
 			select {
@@ -162,17 +149,15 @@ func (c *Cache) AutoGc() {
 	}()
 }
 
-// dump 持久化缓存方法。
+// dump 会将缓存数据持久化到文件中。
 func (c *Cache) dump() error {
-	c.lock.Lock()
-	defer c.lock.Unlock()
-
-	// 创建出 dump 对象并持久化到文件
+	// 这边使用 atomic 包中的原子操作完成状态的切换
+	atomic.StoreInt32(&c.dumping, 1)
+	defer atomic.StoreInt32(&c.dumping, 0)
 	return newDump(c).to(c.options.DumpFile)
 }
 
-// AutoDump 开启定时任务去持久化缓存。
-// 和自动 Gc 的原理是一样的，这里就不再赘述了。
+// AutoDump 会开启一个异步任务去定时持久化缓存数据。
 func (c *Cache) AutoDump() {
 	go func() {
 		ticker := time.NewTicker(time.Duration(c.options.DumpDuration) * time.Minute)
@@ -183,4 +168,12 @@ func (c *Cache) AutoDump() {
 			}
 		}
 	}()
+}
+
+// waitForDumping 会等待持久化完成才返回。
+func (c *Cache) waitForDumping() {
+	for atomic.LoadInt32(&c.dumping) != 0 {
+		// 每次循环都会等待一定的时间，如果不睡眠，会导致 CPU 空转消耗资源
+		time.Sleep(time.Duration(c.options.CasSleepTime) * time.Microsecond)
+	}
 }

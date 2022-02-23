@@ -100,10 +100,13 @@ func ttlOf(request *http.Request) (int64, error) {
 	return strconv.ParseInt(ttls[0], 10, 64)
 }
 
-// deleteHandler 从缓存中删除指定数据。
 func (hs *HTTPServer) deleteHandler(writer http.ResponseWriter, request *http.Request, params httprouter.Params) {
 	key := params.ByName("key")
-	hs.cache.Delete(key)
+	err := hs.cache.Delete(key) // 原本这个方法没有返回值，现在需要加上
+	if err != nil {
+		writer.WriteHeader(http.StatusInternalServerError)
+		return
+	}
 }
 
 // statusHandler 返回缓存信息。

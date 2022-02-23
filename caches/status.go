@@ -13,7 +13,7 @@ type Status struct {
 }
 
 // newStatus 返回一个缓存信息对象指针。
-func newStatus() *Status {
+func NewStatus() *Status {
 	return &Status{
 		Count:     0,
 		KeySize:   0,
@@ -41,5 +41,3 @@ func (s *Status) subEntry(key string, value []byte) {
 func (s *Status) entrySize() int64 {
 	return s.KeySize + s.ValueSize
 }
-
-

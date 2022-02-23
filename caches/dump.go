@@ -8,30 +8,36 @@ import (
 )
 
 type dump struct {
-	Data map[string]*value
-	Options Options
-	Status *Status
+	// SegmentSize 是 segment 的数量。
+	SegmentSize int
+
+	// Segments 存储着所有的 segment 实例。
+	Segments []*segment
+
+	// Options 是缓存的选项配置。
+	Options *Options
 }
 
-
+// newEmptyDump 返回一个空的持久化实例。
 func newEmptyDump() *dump {
 	return &dump{}
 }
 
+// newDump 返回一个从缓存实例初始化过来的持久化实例。
 func newDump(c *Cache) *dump {
 	return &dump{
-		Data:    c.data,
-		Options: c.options,
-		Status:  c.status,
+		SegmentSize: c.segmentSize,
+		Segments:    c.segments,
+		Options:     c.options,
 	}
 }
 
-// nowSuffix 返回一个类似于 20060102150405 的文件后缀名.
+// nowSuffix 返回当前时间，类似于 20060102150405。
 func nowSuffix() string {
 	return "." + time.Now().Format("20060102150405")
 }
 
-// to 会将 dump 持久化到 dumpFile 中
+// to 会将 dump 实例持久化到文件中。
 func (d *dump) to(dumpFile string) error {
 
 	newDumpFile := dumpFile + nowSuffix()
@@ -43,23 +49,19 @@ func (d *dump) to(dumpFile string) error {
 
 	err = gob.NewEncoder(file).Encode(d)
 	if err != nil {
-		// 注意这里需要先把文件关闭了，不然 os.Remove 是没有权限删除这个文件的
 		file.Close()
 		os.Remove(newDumpFile)
 		return err
 	}
 
-	// 将旧的持久化文件删除
 	os.Remove(dumpFile)
-
-
 	file.Close()
 	return os.Rename(newDumpFile, dumpFile)
 }
 
-// from 会从 dumpFile 中恢复数据到一个 Cache 结构对象并返回。
+// from 返回一个从持久化文件中恢复的缓存实例。
 func (d *dump) from(dumpFile string) (*Cache, error) {
-	// 读取 dumpFile 文件并使用反序列化器进行反序列化
+
 	file, err := os.Open(dumpFile)
 	if err != nil {
 		return nil, err
@@ -70,15 +72,16 @@ func (d *dump) from(dumpFile string) (*Cache, error) {
 		return nil, err
 	}
 
-	// 然后初始化一个缓存对象并返回
+	// 恢复出 segment 之后需要为每一个 segment 的未导出字段进行初始化
+	for _, segment := range d.Segments {
+		segment.options = d.Options
+		segment.lock = &sync.RWMutex{}
+	}
+
 	return &Cache{
-		data:    d.Data,
-		options: d.Options,
-		status:  d.Status,
-		lock:    &sync.RWMutex{},
+		segmentSize: d.SegmentSize,
+		segments:    d.Segments,
+		options:     d.Options,
+		dumping:     0,
 	}, nil
 }
-
-
-
-

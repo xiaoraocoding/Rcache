@@ -1,5 +1,7 @@
 package servers
 
+import "Rcache/caches"
+
 const (
 	// APIVersion 代表当前服务的版本。
 	// 因为我们做的服务是提供给外部调用的，而版本的升级可能会带来 API 的改动。
@@ -12,4 +14,11 @@ type Server interface {
 
 	// Run 会将服务器启动指定的 address 上。
 	Run(address string) error
+}
+
+func NewServer(serverType string, cache *caches.Cache) Server {
+	if serverType == "tcp" {
+		return NewTCPServer(cache)
+	}
+	return NewHTTPServer(cache)
 }

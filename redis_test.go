@@ -1,31 +1,24 @@
 package main
 
 import (
-	"github.com/gomodule/redigo/redis"
 	"strconv"
-	"sync"
 	"testing"
 	"time"
+
+	"github.com/gomodule/redigo/redis"
 )
 
 const (
-	// concurrency 是测试并发度。
-	concurrency = 1000
+	// keySize 是测试的键值对数量。
+	keySize = 10000
 )
 
 // testTask 是一个包装器，包装一个任务为测试任务。
 func testTask(task func(no int)) string {
-
 	beginTime := time.Now()
-	wg := &sync.WaitGroup{}
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(no int) {
-			defer wg.Done()
-			task(no)
-		}(i)
+	for i := 0; i < keySize; i++ {
+		task(i)
 	}
-	wg.Wait()
 	return time.Now().Sub(beginTime).String()
 }
 
